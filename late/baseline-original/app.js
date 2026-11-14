@@ -1,0 +1,621 @@
+const DATA = window.APP_DATA;
+const LOG_ENDPOINT = (window.LOG_ENDPOINT || DATA.config?.logEndpoint || "").trim();
+
+let state = {
+  lang: "ja",
+  screen: "language",
+  participantId: "",
+  email: "",
+  consent: false,
+  sessionId: (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random()),
+  preSurveyAnswers: {},
+  postSurveyAnswers: {},
+  introIndex: 0,
+  qIndex: 0,
+  selected: null,
+  score: 0,
+  answers: [],
+  questionStartedAt: null,
+  sessionStartedAt: new Date().toISOString(),
+  completedAt: null,
+  postSurveyCompletedAt: null,
+  error: "",
+  validationErrors: {},
+  isSubmittingPost: false
+};
+
+const app = document.getElementById("app");
+const t = (key) => DATA.ui[state.lang][key] || key;
+const textOf = (obj) => typeof obj === "string" ? obj : obj?.[state.lang] || obj?.ja || "";
+const $ = (s) => document.querySelector(s);
+
+function syncSelectionState(root=app){
+  root.querySelectorAll(".choice, .scale-option, .classify-option").forEach(label => {
+    const input = label.querySelector("input");
+    label.classList.toggle("is-selected", Boolean(input?.checked));
+  });
+}
+app.addEventListener("change", (event) => {
+  if(event.target.matches('input[type="radio"], input[type="checkbox"]')) syncSelectionState();
+});
+
+function escapeHtml(str){
+  return String(str ?? "").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+function csvEscape(v){
+  const s = String(v ?? "");
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g,'""')}"` : s;
+}
+function correctValue(q){
+  if(q.type === "classify") return Object.entries(q.correct_groups).map(([k,v])=>`${k}:${textOf(v)}`).join("; ");
+  if(Array.isArray(q.correct)) return q.correct.join("|");
+  return q.correct;
+}
+function selectedValue(sel){
+  if(Array.isArray(sel)) return sel.join("|");
+  if(sel && typeof sel === "object") return Object.entries(sel).map(([k,v])=>`${k}:${v}`).join("; ");
+  return sel || "";
+}
+function setScreen(screen){
+  state.screen = screen;
+  state.error = "";
+  state.validationErrors = {};
+  render();
+  window.scrollTo({top:0, behavior:"smooth"});
+}
+function layout(content, progressText=""){
+  const ui = DATA.ui[state.lang];
+  return `
+  <main class="site">
+    <header class="header">
+      <div class="brand">
+        <h1>${escapeHtml(ui.appTitle)}</h1>
+        <p>${escapeHtml(ui.subtitle)}</p>
+      </div>
+      ${progressText ? `<div class="badge">${escapeHtml(progressText)}</div>` : ""}
+    </header>
+    ${content}
+  </main>`;
+}
+function classifyGroupLabel(q, groupKey){
+  const labelObj = q.group_labels?.[groupKey];
+  return labelObj ? textOf(labelObj) : groupKey;
+}
+function render(){
+  if(state.screen === "language") renderLanguage();
+  if(state.screen === "pre") renderPreSurvey();
+  if(state.screen === "intro") renderIntro();
+  if(state.screen === "question") renderQuestion();
+  if(state.screen === "feedback") renderFeedback();
+  if(state.screen === "result") renderResult();
+  if(state.screen === "post") renderPostSurvey();
+  if(state.screen === "final") renderFinal();
+  syncSelectionState();
+}
+
+function renderLanguage(){
+  app.innerHTML = layout(`
+    <section class="card center stack">
+      <div class="theme">Bicycle Blue Ticket Simulator 2026</div>
+      <h2 class="title">言語を選択してください / Choose your language</h2>
+      <div class="row">
+        <button class="btn" onclick="chooseLang('ja')">日本語で開始</button>
+        <button class="btn secondary" onclick="chooseLang('en')">Start in English</button>
+      </div>
+    </section>
+  `);
+}
+function chooseLang(lang){
+  state.lang = lang;
+  document.documentElement.lang = lang;
+  setScreen("pre");
+}
+
+
+function scaleOptionLabel(point, q){
+  const labels = {
+    ja: {
+      1: q.min || "あてはまらない",
+      2: "あまりあてはまらない",
+      3: "ややあてはまる",
+      4: q.max || "あてはまる"
+    },
+    en: {
+      1: q.min || "Does not apply",
+      2: "Mostly does not apply",
+      3: "Somewhat applies",
+      4: q.max || "Applies"
+    }
+  };
+  return labels[state.lang]?.[point] || String(point);
+}
+
+function validationMessage(key){
+  return state.validationErrors[key] || "";
+}
+function invalidClass(key){
+  return validationMessage(key) ? " invalid" : "";
+}
+function fieldErrorHtml(key){
+  const message = validationMessage(key);
+  return message ? `<p class="field-error">${escapeHtml(message)}</p>` : "";
+}
+function surveyErrorSummary(){
+  const messages = Object.values(state.validationErrors);
+  if(messages.length === 0) return "";
+  const uniqueMessages = [...new Set(messages)];
+  return `<div class="error-summary" role="alert"><strong>${escapeHtml(state.lang === "ja" ? "未入力または修正が必要な項目があります。" : "Some items are missing or need correction.")}</strong><ul>${uniqueMessages.map(message => `<li>${escapeHtml(message)}</li>`).join("")}</ul></div>`;
+}
+
+function renderSurveyFields(items, answers, prefix=""){
+  let questionNumber = 0;
+  return items.map((q)=>{
+    const value = answers[q.id] || "";
+    const name = `${prefix}${q.id}`;
+    const error = fieldErrorHtml(name);
+    const cardClass = `card survey-card${invalidClass(name)}`;
+
+    const isNotice = q.type === "notice";
+    if(!isNotice) questionNumber += 1;
+    const qLabel = isNotice ? "" : `<div class="theme">Q${questionNumber}</div>`;
+
+    if(isNotice){
+      return `<div class="${cardClass}"><h2 class="title">${escapeHtml(q.title)}</h2></div>`;
+    }
+
+    if(q.type === "single"){
+      return `<div class="${cardClass}">${qLabel}<h2 class="title">${escapeHtml(q.title)}</h2>
+        ${q.choices.map(c=>`<label class="choice"><input type="radio" name="${name}" value="${escapeHtml(c)}" ${value===c?'checked':''}><span class="choice-marker" aria-hidden="true"></span><span class="choice-text">${escapeHtml(c)}</span></label>`).join("")}
+        ${error}
+      </div>`;
+    }
+
+    if(q.type === "scale"){
+      const points = q.points || [1,2,3,4];
+      return `<div class="${cardClass}">${qLabel}<h2 class="title">${escapeHtml(q.title)}</h2>
+        <div class="scale${invalidClass(name)}">
+          <div class="scale-labels"><span class="muted">${escapeHtml(q.min)}</span><span class="muted">${escapeHtml(q.max)}</span></div>
+          <div class="scale-options">${points.map(n=>`<label class="scale-option"><input type="radio" name="${name}" value="${n}" ${String(value)===String(n)?'checked':''}><span class="scale-number">${n}</span><span class="scale-text">${escapeHtml(scaleOptionLabel(n, q))}</span></label>`).join("")}</div>
+        </div>
+        ${error}
+      </div>`;
+    }
+
+    if(q.type === "number"){
+      const min = q.min ?? "";
+      const max = q.max ?? "";
+      return `<div class="${cardClass}">${qLabel}<h2 class="title">${escapeHtml(q.title)}</h2>
+        <input class="input${invalidClass(name)}" type="number" name="${name}" min="${escapeHtml(min)}" max="${escapeHtml(max)}" placeholder="${escapeHtml(q.placeholder || "")}" value="${escapeHtml(value)}" />
+        ${error}
+      </div>`;
+    }
+
+    if(q.type === "multi"){
+      const arr = Array.isArray(value) ? value : [];
+      return `<div class="${cardClass}">${qLabel}<h2 class="title">${escapeHtml(q.title)}</h2>
+        ${q.choices.map(c=>`<label class="choice"><input type="checkbox" name="${name}" value="${escapeHtml(c)}" ${arr.includes(c)?'checked':''}><span class="choice-marker" aria-hidden="true"></span><span class="choice-text">${escapeHtml(c)}</span></label>`).join("")}
+        <input class="input" data-other="${name}" placeholder="${escapeHtml(t('otherText'))}" value="${escapeHtml(answers[q.id+'_other']||'')}" />
+        ${error}
+      </div>`;
+    }
+
+    return `<div class="${cardClass}">${qLabel}<h2 class="title">${escapeHtml(q.title)}</h2>
+      <textarea class="textarea${invalidClass(name)}" name="${name}" placeholder="${q.optional ? (state.lang==='ja'?'任意':'Optional') : ''}">${escapeHtml(value)}</textarea>
+      ${error}
+    </div>`;
+  }).join("");
+}
+function collectSurvey(formElement, items, answers, prefix=""){
+  const form = new FormData(formElement);
+  const nextAnswers = {...answers};
+  const errors = {};
+  for(const q of items){
+    const name = `${prefix}${q.id}`;
+    if(q.type === "multi"){
+      const vals = form.getAll(name);
+      nextAnswers[q.id] = vals;
+            const other = document.querySelector(`[data-other="${name}"]`)?.value.trim() || "";
+      nextAnswers[q.id+"_other"] = other;
+      if(vals.length === 0 && !q.optional) errors[name] = t("required");
+    }else if(q.type === "number"){
+      const val = form.get(name) || "";
+      nextAnswers[q.id] = val;
+      if(!val && !q.optional){
+        errors[name] = t("required");
+      }else if(val){
+        const n = Number(val);
+        if(!Number.isFinite(n) || (q.min !== undefined && n < q.min) || (q.max !== undefined && n > q.max)){
+          errors[name] = state.lang === "ja" ? `${q.min}〜${q.max}の範囲で入力してください。` : `Please enter a value between ${q.min} and ${q.max}.`;
+        }
+      }
+    }else{
+      const val = form.get(name) || "";
+      nextAnswers[q.id] = val;
+      if(!val && !q.optional) errors[name] = t("required");
+    }
+  }
+  Object.assign(answers, nextAnswers);
+  state.validationErrors = {...state.validationErrors, ...errors};
+  return Object.keys(errors).length === 0;
+}
+function renderPreSurvey(){
+  const survey = DATA.survey[state.lang];
+  const fields = renderSurveyFields(survey, state.preSurveyAnswers, "pre_");
+  const idHelp = state.lang === "ja"
+    ? "本名は入力せず，好きな英字4文字＋数字2桁で入力してください。例：BIKE33，NEKO12，STAR07"
+    : "Do not enter your real name. Use four letters and two digits, such as BIKE33, NEKO12, or STAR07.";
+  const emailHelp = state.lang === "ja"
+    ? "1週間後の追加アンケートに協力できる場合のみ入力してください。入力は任意です。"
+    : "Enter your email only if you can cooperate with the follow-up survey one week later. This is optional.";
+  const consentText = state.lang === "ja"
+    ? "回答内容，正誤，回答時間を研究目的で記録することに同意します。"
+    : "I agree that my answers, correctness, and response time may be recorded for research purposes.";
+  const summary = surveyErrorSummary();
+  app.innerHTML = layout(`
+    ${summary}
+    <section class="card">
+      <div class="theme">${escapeHtml(t('surveyTitle'))}</div>
+      <h2 class="title">${escapeHtml(t('participantId'))}</h2>
+      <input id="participant" class="input${invalidClass('participant')}" placeholder="BIKE33" value="${escapeHtml(state.participantId)}" />
+      ${fieldErrorHtml('participant')}
+      <p class="notice">${escapeHtml(idHelp)}</p>
+      <h2 class="title" style="margin-top:18px">${state.lang === "ja" ? "メールアドレス（任意）" : "Email address (optional)"}</h2>
+      <input id="email" class="input${invalidClass('email')}" type="email" placeholder="example@example.com" value="${escapeHtml(state.email)}" />
+      ${fieldErrorHtml('email')}
+      <p class="notice">${escapeHtml(emailHelp)}</p>
+      <label class="choice consent-choice${invalidClass('consent')}"><input id="consent" type="checkbox" ${state.consent ? 'checked' : ''}><span class="choice-marker" aria-hidden="true"></span><span class="choice-text">${escapeHtml(consentText)}</span></label>
+      ${fieldErrorHtml('consent')}
+    </section>
+    <form id="preSurveyForm">${fields}
+      <div class="row card"><button type="submit" class="btn">${escapeHtml(t('start'))}</button></div>
+    </form>
+  `);
+  $("#preSurveyForm").addEventListener("submit", submitPreSurvey);
+}
+function submitPreSurvey(e){
+  e.preventDefault();
+  state.validationErrors = {};
+  state.error = "";
+  state.participantId = $("#participant").value.trim();
+  state.email = $("#email").value.trim();
+  state.consent = $("#consent").checked;
+  const errors = {};
+  if(!state.participantId) errors.participant = t("required");
+  else if(!/^[A-Za-z]{4}\d{2}$/.test(state.participantId)){
+    errors.participant = state.lang === "ja" ? "参加者IDは英字4文字＋数字2桁で入力してください。例：BIKE33" : "Participant ID must be four letters and two digits, such as BIKE33.";
+  }
+  if(state.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(state.email)){
+    errors.email = state.lang === "ja" ? "メールアドレスの形式を確認してください。" : "Please check the email address format.";
+  }
+  if(!state.consent) errors.consent = state.lang === "ja" ? "同意欄にチェックしてください。" : "Please check the consent box.";
+  state.validationErrors = errors;
+  const surveyOk = collectSurvey(e.target, DATA.survey[state.lang], state.preSurveyAnswers, "pre_");
+  if(Object.keys(state.validationErrors).length > 0 || !surveyOk) return renderPreSurvey();
+  state.introIndex = 0;
+  setScreen("intro");
+}
+
+function renderIntro(){
+  const card = DATA.introCards[state.introIndex];
+  app.innerHTML = layout(`
+    <section class="card stack">
+      <div class="theme">${escapeHtml(textOf(card.theme))}</div>
+      <h2 class="title">${escapeHtml(textOf(card.title))}</h2>
+      <p>${escapeHtml(textOf(card.body)).replace(/\n/g,"<br>")}</p>
+      <p class="notice">${escapeHtml(textOf(card.hint))}</p>
+      <div class="row"><button class="btn" onclick="nextIntro()">${escapeHtml(t('next'))}</button></div>
+    </section>
+  `, `${state.introIndex+1} / ${DATA.introCards.length}`);
+}
+function nextIntro(){
+  if(state.introIndex < DATA.introCards.length-1){ state.introIndex++; renderIntro(); }
+  else { state.qIndex = 0; state.questionStartedAt = new Date().toISOString(); setScreen("question"); }
+}
+
+function renderQuestion(){
+  const q = DATA.questions[state.qIndex];
+  const progress = `${state.qIndex+1} / ${DATA.questions.length}`;
+  let inputHtml = "";
+  if(q.type === "single"){
+    inputHtml = Object.keys(q.choices).map(k=>`<label class="choice"><input type="radio" name="answer" value="${k}"><span class="choice-marker" aria-hidden="true">${k}</span><span class="choice-text">${escapeHtml(textOf(q.choices[k]))}</span></label>`).join("");
+  } else if(q.type === "multi"){
+    inputHtml = Object.keys(q.choices).map(k=>`<label class="choice"><input type="checkbox" name="answer" value="${k}"><span class="choice-marker" aria-hidden="true">${k}</span><span class="choice-text">${escapeHtml(textOf(q.choices[k]))}</span></label>`).join("");
+  } else if(q.type === "classify"){
+    inputHtml = Object.keys(q.choices).map(k=>`
+      <div class="choice classify-choice">
+        <div class="classify-prompt"><span class="choice-marker" aria-hidden="true">${k}</span><span class="choice-text">${escapeHtml(textOf(q.choices[k]))}</span></div>
+        <div class="classify-options">
+  ${q.groups.map(g=>`<label class="classify-option"><input type="radio" name="class_${k}" value="${escapeHtml(g)}"><span>${escapeHtml(classifyGroupLabel(q, g))}</span></label>`).join("")}
+</div>
+      </div>`).join("");
+  }
+  app.innerHTML = layout(`
+    ${q.image ? `<img class="question-img" src="./assets/${escapeHtml(q.image)}" alt="">` : ""}
+    <section class="card">
+      <div class="theme">${escapeHtml(textOf(q.theme))}</div>
+      <h2 class="title">${escapeHtml(textOf(q.title))}</h2>
+      ${q.prelude ? `<p class="prelude">${escapeHtml(textOf(q.prelude))}</p>` : ""}
+      <p>${escapeHtml(textOf(q.body))}</p>
+      ${state.error ? `<p class="error">${escapeHtml(state.error)}</p>` : ""}
+      <form id="qForm">${inputHtml}<div class="row"><button class="btn" type="submit">${escapeHtml(t('submit'))}</button></div></form>
+    </section>
+  `, progress);
+  $("#qForm").addEventListener("submit", submitQuestion);
+}
+function submitQuestion(e){
+  e.preventDefault();
+  const q = DATA.questions[state.qIndex];
+  const form = new FormData(e.target);
+  let selected, isCorrect = false;
+  if(q.type === "single"){
+    selected = form.get("answer");
+    if(!selected){ state.error=t("required"); return renderQuestion(); }
+    isCorrect = selected === q.correct;
+  } else if(q.type === "multi"){
+    selected = form.getAll("answer").sort();
+    if(selected.length===0){ state.error=t("required"); return renderQuestion(); }
+    isCorrect = JSON.stringify(selected) === JSON.stringify([...q.correct].sort());
+  } else if(q.type === "classify"){
+    selected = {};
+    for(const k of Object.keys(q.choices)){
+      const v = form.get(`class_${k}`);
+      if(!v){ state.error=t("required"); return renderQuestion(); }
+      selected[k] = v;
+    }
+    isCorrect = Object.keys(q.correct_groups).every(k => selected[k] === q.correct_groups[k]);
+  }
+  const answeredAt = new Date().toISOString();
+  const responseTime = new Date(answeredAt) - new Date(state.questionStartedAt);
+  if(isCorrect) state.score++;
+  state.selected = selected;
+  state.answers.push({
+    session_id: state.sessionId,
+    participant_id: state.participantId,
+    language: state.lang,
+    question_id: q.id,
+    selected_answer: selectedValue(selected),
+    correct_answer: correctValue(q),
+    is_correct: isCorrect,
+    question_started_at: state.questionStartedAt,
+    answered_at: answeredAt,
+    response_time_ms: responseTime
+  });
+  setScreen("feedback");
+}
+function renderFeedback(){
+  const q = DATA.questions[state.qIndex];
+  const selected = state.selected;
+  const row = state.answers[state.answers.length-1];
+  let details = "";
+  if(q.type === "classify"){
+    details = Object.keys(q.choices).map(k=>{
+      const ok = selected[k] === q.correct_groups[k];
+      return `<div class="detail-item"><span class="${ok?'good':'bad'}">${ok?'✓':'✗'}</span> <strong>${k}</strong> ${escapeHtml(textOf(q.choices[k]))}<br>
+      <span class="muted">${escapeHtml(t('yourAnswer'))}: ${escapeHtml(classifyGroupLabel(q, selected[k]))} / ${escapeHtml(t('correctAnswer'))}: ${escapeHtml(classifyGroupLabel(q, q.correct_groups[k]))}</span><br>
+      ${escapeHtml(textOf(q.per_choice_feedback[k]))}</div>`;
+    }).join("");
+  } else {
+    const selectedSet = new Set(Array.isArray(selected) ? selected : [selected]);
+    const correctSet = new Set(Array.isArray(q.correct) ? q.correct : [q.correct]);
+    details = Object.keys(q.choices).map(k=>{
+      const picked = selectedSet.has(k), should = correctSet.has(k);
+      let mark='・', cls='', status='';
+      if(picked && should){mark='✓';cls='good';status= state.lang==='ja'?'選択して正解':'Selected correctly';}
+      else if(picked && !should){mark='✗';cls='bad';status= state.lang==='ja'?'選択したが不正解':'Selected but incorrect';}
+      else if(!picked && should){mark='△';cls='warn';status= state.lang==='ja'?'選ばなかったが本来は必要':'Should have selected';}
+      else {status= state.lang==='ja'?'選ばなくてよい':'Not needed';}
+      return `<div class="detail-item"><span class="${cls}">${mark} ${escapeHtml(status)}</span><br><strong>${k}</strong> ${escapeHtml(textOf(q.choices[k]))}<br>${escapeHtml(textOf(q.feedback[k]))}</div>`;
+    }).join("");
+      }
+  const ok = row.is_correct;
+  const nextLabel = state.qIndex >= DATA.questions.length-1 ? t("seeResult") : t("next");
+  app.innerHTML = layout(`
+    <section class="card">
+      <div class="${ok?'feedback-ok':'feedback-ng'}">${escapeHtml(ok ? t('correct') : t('review'))}</div>
+      <p class="notice">${escapeHtml(textOf(ok ? q.result_ok : q.result_ng))}</p>
+      <div class="detail"><h3>${state.lang==='ja'?'各選択肢の整理':'Review of choices'}</h3>${details}</div>
+      <div class="row"><button class="btn" onclick="nextQuestion()">${escapeHtml(nextLabel)}</button></div>
+    </section>
+  `, `${state.score} / ${DATA.questions.length}`);
+}
+function nextQuestion(){
+  if(state.qIndex >= DATA.questions.length-1){
+    state.completedAt = new Date().toISOString();
+    setScreen("result");
+  }else{
+    state.qIndex++;
+    state.questionStartedAt = new Date().toISOString();
+    setScreen("question");
+  }
+}
+
+function diagnosis(){
+  const s = state.score;
+  if(state.lang === "ja"){
+    if(s>=10) return ["ルール判断マスター型","多くの場面で，交通ルールと安全判断を安定して結びつけられています。"];
+    if(s>=7) return ["基本理解型","基本的なルールは理解できていますが，一部の場面判断で迷いが残る可能性があります。"];
+    if(s>=4) return ["感覚判断型","危なそうという感覚はありますが，制度上どう扱われるかの整理が必要です。"];
+    return ["これから学習型","青切符制度や具体的な場面判断を，これから整理していく段階です。"];
+  }
+  if(s>=10) return ["Rule Judgment Master","You can connect traffic rules and safe decisions consistently in many situations."];
+  if(s>=7) return ["Basic Understanding Type","You understand the basics, but some situation-based decisions may still be confusing."];
+  if(s>=4) return ["Intuitive Judgment Type","You may sense danger, but need to organize how each action is handled under the system."];
+  return ["Learning Starter","You are at the stage of organizing the blue ticket system and concrete situation-based judgments."];
+}
+function renderResult(){
+  const [type, comment] = diagnosis();
+  const totalQuestions = DATA.questions.length;
+  const pct = Math.round(state.score / totalQuestions * 100);
+  const situationQuestions = DATA.questions.filter(q => q.score_domain === "situation").map(q => q.id);
+  const systemQuestions = DATA.questions.filter(q => q.score_domain === "system").map(q => q.id);
+  const situationCorrect = state.answers.filter(a => a.is_correct && situationQuestions.includes(a.question_id)).length;
+  const systemCorrect = state.answers.filter(a => a.is_correct && systemQuestions.includes(a.question_id)).length;
+  const situationScore = situationQuestions.length ? Math.round((situationCorrect / situationQuestions.length) * 100) : 0;
+  const systemScore = systemQuestions.length ? Math.round((systemCorrect / systemQuestions.length) * 100) : 0;
+  const avgTimeMs = state.answers.length ? Math.round(state.answers.reduce((acc, cur) => acc + Number(cur.response_time_ms || 0), 0) / state.answers.length) : 0;
+  const avgTimeSec = (avgTimeMs / 1000).toFixed(1);
+  const btnText = state.lang === "ja" ? "事後アンケートへ進む" : "Continue to post-survey";
+  app.innerHTML = layout(`
+    <section class="card stack">
+      <div class="theme">${escapeHtml(t('resultTitle'))}</div>
+      <h2 class="title">${escapeHtml(t('score'))}: ${state.score} / ${totalQuestions}</h2>
+      <div class="progress"><div style="width:${pct}%"></div></div>
+      <div class="result-grid">
+        <div class="notice"><strong>${state.lang === "ja" ? "総合正答率" : "Overall accuracy"}</strong><br>${pct}%</div>
+        <div class="notice"><strong>${state.lang === "ja" ? "場面判断スコア" : "Situation judgment score"}</strong><br>${situationScore}%</div>
+        <div class="notice"><strong>${state.lang === "ja" ? "制度理解スコア" : "System understanding score"}</strong><br>${systemScore}%</div>
+        <div class="notice"><strong>${state.lang === "ja" ? "平均回答時間" : "Average response time"}</strong><br>${avgTimeSec}s</div>
+      </div>
+      <p class="result-type">${escapeHtml(type)}</p>
+      <p>${escapeHtml(comment)}</p>
+      <p class="notice">${state.lang === "ja" ? "最後に，学習後の意識変化を確認するための簡単な事後アンケートに回答してください。" : "Finally, please answer a short post-survey to check changes after learning."}</p>
+      <div class="row"><button class="btn" onclick="setScreen('post')">${escapeHtml(btnText)}</button></div>
+    </section>
+  `, `${state.score} / ${totalQuestions}`);
+}
+
+function renderPostSurvey(){
+  const survey = DATA.postSurvey[state.lang];
+  const fields = renderSurveyFields(survey, state.postSurveyAnswers, "post_");
+  const summary = surveyErrorSummary();
+  const submittingNotice = `<p class="notice sending-notice">${state.isSubmittingPost
+    ? (state.lang === "ja" ? "送信中です。画面が切り替わるまで、送信ボタンは1度だけ押してお待ちください。" : "Submitting. Please press the submit button only once and wait until the screen changes.")
+    : (state.lang === "ja" ? "送信ボタンを押すと画面が切り替わります。二重送信を防ぐため、送信ボタンは1度だけ押してください。" : "After pressing submit, the screen will change. To prevent duplicate submissions, please press the submit button only once.")}</p>`;
+
+  app.innerHTML = layout(`
+    ${summary}
+    <section class="card">
+      <div class="theme">${state.lang === "ja" ? "事後アンケート" : "Post-survey"}</div>
+      <h2 class="title">${state.lang === "ja" ? "学習後の変化について" : "About changes after learning"}</h2>
+      ${submittingNotice}
+    </section>
+    <form id="postSurveyForm">${fields}
+      <div class="row card"><button type="submit" class="btn" ${state.isSubmittingPost ? "disabled" : ""}>${state.isSubmittingPost ? (state.lang === "ja" ? "送信中です…" : "Submitting...") : (state.lang === "ja" ? "送信して終了" : "Submit and finish")}</button></div>
+    </form>
+  `, `${state.score} / ${DATA.questions.length}`);
+
+  $("#postSurveyForm").addEventListener("submit", submitPostSurvey);
+}
+function submitPostSurvey(e){
+  e.preventDefault();
+  if(state.isSubmittingPost) return;
+  state.validationErrors = {};
+  state.error = "";
+  if(!collectSurvey(e.target, DATA.postSurvey[state.lang], state.postSurveyAnswers, "post_")) return renderPostSurvey();
+  state.postSurveyCompletedAt = new Date().toISOString();
+  state.isSubmittingPost = true;
+  renderPostSurvey();
+  sendCompletionLog().finally(() => { state.isSubmittingPost = false; setScreen("final"); });
+}
+function followupFormsForParticipant(){
+  const forms = DATA.config?.followupForms || {};
+  const mode = DATA.config?.followupDeliveryMode || "language";
+  if(mode === "both") return Object.entries(forms).filter(([,url]) => url).map(([lang,url]) => ({lang, url}));
+  const url = forms[state.lang] || forms.ja || forms.en || "";
+  return url ? [{lang: state.lang, url}] : [];
+}
+
+function followupEmailPreview(){
+  if(!state.email) return null;
+  const forms = followupFormsForParticipant();
+  const formLines = forms.map(f => `${f.lang.toUpperCase()}: ${f.url}`);
+  const subject = state.lang === "ja" ? "自転車青切符シミュレーター 1週間後アンケートのお願い" : "Follow-up survey for the Bicycle Blue Ticket Simulator";
+  const choiceInstruction = forms.length > 1
+    ? (state.lang === "ja" ? "下記のうち回答しやすい言語のフォームを1つ選んで回答してください。" : "Please choose one form in the language you prefer and answer it.")
+    : (state.lang === "ja" ? "下記のフォームに回答してください。" : "Please answer the form below.");
+  const body = state.lang === "ja"
+    ? `ご協力ありがとうございます。1週間後アンケートにご回答ください。\n${choiceInstruction}\n\n参加者ID: ${state.participantId}\n${formLines.join("\n")}\n\n回答時にも参加者IDを入力してください。`
+    : `Thank you for your participation. Please answer the one-week follow-up survey.\n${choiceInstruction}\n\nParticipant ID: ${state.participantId}\n${formLines.join("\n")}\n\nPlease enter this participant ID when answering the form.`;
+  return {subject, body, forms};
+}
+
+function renderFinal(){
+  const emailPreview = followupEmailPreview();
+  const follow = state.email
+    ? (state.lang === "ja" ? `入力されたメールアドレスへ、1週間後に参加者ID（${state.participantId}）を添えてGoogleフォームの追跡アンケートURLを送付します。` : `A Google Form follow-up survey URL will be sent to the entered email one week later with your participant ID (${state.participantId}).`)
+    : (state.lang === "ja" ? "メールアドレスは未入力のため，1週間後アンケートの送付対象にはなりません。" : "No email address was entered, so no follow-up survey will be sent.");
+  app.innerHTML = layout(`
+    <section class="card stack center final-card">
+      <div class="theme">${state.lang === "ja" ? "終了" : "Finished"}</div>
+      <h2 class="title">${state.lang === "ja" ? "ご協力ありがとうございました" : "Thank you for your cooperation"}</h2>
+      <p>${escapeHtml(follow)}</p>
+      ${emailPreview ? `<p class="notice followup-links">${escapeHtml(emailPreview.forms.map(f => `${f.lang.toUpperCase()}: ${f.url}`).join(" / "))}</p>` : ""}
+      <div class="row"><button class="btn" onclick="location.reload()">${escapeHtml(t('restart'))}</button></div>
+    </section>
+  `);
+}
+
+function buildSummary(){
+  const totalQuestions = DATA.questions.length;
+  const overall = Math.round((state.score / totalQuestions) * 100);
+  const situationIds = DATA.questions.filter(q => q.score_domain === "situation").map(q => q.id);
+  const systemIds = DATA.questions.filter(q => q.score_domain === "system").map(q => q.id);
+  const situationCorrect = state.answers.filter(a => a.is_correct && situationIds.includes(a.question_id)).length;
+  const systemCorrect = state.answers.filter(a => a.is_correct && systemIds.includes(a.question_id)).length;
+  return {
+    overall_accuracy: overall,
+    situation_score: situationIds.length ? Math.round((situationCorrect / situationIds.length) * 100) : 0,
+    system_score: systemIds.length ? Math.round((systemCorrect / systemIds.length) * 100) : 0
+  };
+}
+
+async function sendCompletionLog(){
+  if(!LOG_ENDPOINT) return;
+  const payload = {
+    session_id: state.sessionId,
+    participant_id: state.participantId,
+    email: state.email,
+    language: state.lang,
+    session_started_at: state.sessionStartedAt,
+    simulation_completed_at: state.completedAt,
+    post_survey_completed_at: state.postSurveyCompletedAt,
+    followup: {
+      requested: Boolean(state.email),
+      send_at: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      delivery_mode: DATA.config?.followupDeliveryMode || "language",
+      email_preview: followupEmailPreview()
+    },
+    summary: buildSummary(),
+    pre_survey: state.preSurveyAnswers,
+    post_survey: state.postSurveyAnswers,
+    answers: state.answers
+  };
+  try{
+    await fetch(LOG_ENDPOINT, {
+      method: "POST",
+      mode: "no-cors",
+      headers: {"Content-Type":"text/plain;charset=utf-8"},
+      body: JSON.stringify(payload)
+    });
+  }catch(_e){}
+}
+
+function downloadCsv(){
+  const rows = [];
+  rows.push(["section","key","value"]);
+  rows.push(["session","session_id",state.sessionId]);
+  rows.push(["session","participant_id",state.participantId]);
+  rows.push(["session","email",state.email]);
+  rows.push(["session","followup_requested",Boolean(state.email)]);
+  rows.push(["session","followup_forms",followupFormsForParticipant().map(f=>`${f.lang}:${f.url}`).join("|")]);
+  rows.push(["session","language",state.lang]);
+  rows.push(["session","started_at",state.sessionStartedAt]);
+  rows.push(["session","simulation_completed_at",state.completedAt]);
+  rows.push(["session","post_survey_completed_at",state.postSurveyCompletedAt]);
+  rows.push(["session","total_score",state.score]);
+  for(const [k,v] of Object.entries(state.preSurveyAnswers)) rows.push(["pre_survey",k,Array.isArray(v)?v.join("|"):v]);
+  for(const [k,v] of Object.entries(state.postSurveyAnswers)) rows.push(["post_survey",k,Array.isArray(v)?v.join("|"):v]);
+  rows.push([]);
+  rows.push(["question_id","selected_answer","correct_answer","is_correct","question_started_at","answered_at","response_time_ms"]);
+  state.answers.forEach(a=>rows.push([a.question_id,a.selected_answer,a.correct_answer,a.is_correct,a.question_started_at,a.answered_at,a.response_time_ms]));
+  const csv = "\ufeff" + rows.map(r=>r.map(csvEscape).join(",")).join("\n");
+  const blob = new Blob([csv], {type:"text/csv;charset=utf-8"});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `${state.participantId || "participant"}_${new Date().toISOString().replace(/[:.]/g,"-")}.csv`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+render();

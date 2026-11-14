@@ -1,0 +1,74 @@
+{
+  "source_repository": "https://github.com/uchigasaki/blue-ticket-simulator.git",
+  "source_commit": "5314bdafa1cb32847b296d648d1c6e428fd49211",
+  "captured_at": "2026-08-24",
+  "algorithm": "sha256",
+  "files": [
+    {
+      "path": "app.js",
+      "sha256": "0922621d0fc43bb16e8121293cbd05a04ff9c0e04f413c95b242e52ab24c1820",
+      "bytes": 32832
+    },
+    {
+      "path": "assets/q1_narrow_road.png",
+      "sha256": "518548292a593680e382d53db3b881b3f0bf639cd667046123b1a4b555a53cd7",
+      "bytes": 4538815
+    },
+    {
+      "path": "assets/q2_sidewalk_pedestrians.png",
+      "sha256": "7408b585643d3f1990fdd15e5c334dd3e6e7046bc1b1e071af35e0b44b259228",
+      "bytes": 4794687
+    },
+    {
+      "path": "assets/q3_yellow_signal.png",
+      "sha256": "626f1406631422a3b83a49503d8a3e7528658e71d87f2a4f503a4104245f90ad",
+      "bytes": 3832154
+    },
+    {
+      "path": "assets/q4_stop_line.png",
+      "sha256": "e12a273c5eeb7a748d8fac439819182ded543562d29ea000d8b9669fc2825e85",
+      "bytes": 4384703
+    },
+    {
+      "path": "assets/q5_railroad.png",
+      "sha256": "f1be1a939b99a7f4a3cbb706605f8dc1eda677634ec8267194ea802c5591716d",
+      "bytes": 5535157
+    },
+    {
+      "path": "assets/q6_parallel.png",
+      "sha256": "2f298314faac7eab52d88f1c23a5ccf24222f4a17045fda165e899dd3b011deb",
+      "bytes": 5100300
+    },
+    {
+      "path": "assets/q7_light.png",
+      "sha256": "74c77426c6f3aff9b621827590b91edfed9d32ac6206ab4b1a84eb6c20f4b7dc",
+      "bytes": 5020293
+    },
+    {
+      "path": "data.js",
+      "sha256": "54ca91d1a8e9e1b2bea6600f36d02e1dfec377b193ad64a21995f5a4f53a62f5",
+      "bytes": 74326
+    },
+    {
+      "path": "index.html",
+      "sha256": "0c1dd204cb6e7a4a07f661f2c0188e8c6d28b00dcf71c062062c6a167f5ee7a0",
+      "bytes": 487
+    },
+    {
+      "path": "README.md",
+      "sha256": "8a6f1924f2ab64fddb4d4ae6f141949a3bd63eeef1c8d3af386a87b19ae32083",
+      "bytes": 5010
+    },
+    {
+      "path": "styles.css",
+      "sha256": "94c9cf88da87e4b34889ce7a89c622b880374e93bd3ecdb43fa491fe2ed5218d",
+      "bytes": 9541
+    },
+    {
+      "path": "事前事後アンケート答え管理.txt",
+      "sha256": "e8c47e1926767da341060805986427af1233e6ee0344b1ecf911d857c57c0820",
+      "bytes": 268
+    }
+  ],
+  "archive_note": "Hashes below refer to the archive copy. Original hashes are recorded in baseline-manifest.original.json."
+}
